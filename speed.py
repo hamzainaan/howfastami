@@ -7,6 +7,7 @@ import time
 import json
 import socket
 import struct
+import http.client
 import unicodedata
 import urllib.request
 import urllib.error
@@ -260,16 +261,43 @@ def fetch_meta():
         "country": country
     }
 
+class PersistentProber:
+    def __init__(self, host="speed.cloudflare.com"):
+        self.host = host
+        self.conn = None
+        self.lock = threading.Lock()
+        self._connect()
+
+    def _connect(self):
+        try:
+            if self.conn:
+                self.conn.close()
+            # redo the connection and TLS handshake and keep the tunnel open
+            self.conn = http.client.HTTPSConnection(self.host, timeout=3, context=SSL_CTX)
+            self.conn.connect()
+        except Exception:
+            self.conn = None
+
+    def probe(self):
+        with self.lock:
+            if not self.conn:
+                self._connect()
+                if not self.conn:
+                    return None
+
+            t0 = time.perf_counter()
+            try:
+                self.conn.request("GET", "/__down?bytes=0", headers=CF_HEADERS)
+                res = self.conn.getresponse()
+                res.read()
+                return (time.perf_counter() - t0) * 1000.0
+            except Exception:
+                self._connect()
+                return None
+
 def single_probe():
-    url = "https://speed.cloudflare.com/__down?bytes=0"
-    req = urllib.request.Request(url, headers=CF_HEADERS)
-    t0 = time.perf_counter()
-    try:
-        with urllib.request.urlopen(req, timeout=3, context=SSL_CTX) as res:
-            res.read()
-            return (time.perf_counter() - t0) * 1000.0
-    except Exception:
-        return None
+    PROBER = PersistentProber()
+    return PROBER.probe()
 
 def measure_unloaded(samples=12, callback=None):
     results = []
